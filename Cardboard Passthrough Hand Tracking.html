@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cardboard Passthrough Hand Tracking</title>
+<style>
+:root{--bg:#0b0d12;--fg:#f2f5fa;--muted:#9aa4b5;--acc:#3ddc97;--card:#151a23;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+#ui{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg);z-index:5;padding:16px;overflow:auto}
+.card{max-width:460px;background:var(--card);border-radius:16px;padding:22px}
+h1{font-size:20px;margin:0 0 8px}
+p,li{color:var(--muted);font-size:14px;line-height:1.5}
+ul{padding-left:18px;margin:8px 0 14px}
+button{font:inherit;border:0;border-radius:10px;padding:12px 16px;background:var(--acc);color:#04130c;font-weight:600;width:100%;margin-top:6px}
+button.sec{background:#262e3b;color:var(--fg)}
+#status{color:var(--acc);font-size:13px;margin-top:10px;min-height:18px}
+#hud{position:fixed;left:50%;top:6px;transform:translateX(-50%);z-index:4;display:none;gap:6px}
+#hud button{width:auto;padding:6px 10px;font-size:12px;margin:0;background:#000a;color:#fff}
+label{display:block;color:var(--muted);font-size:13px;margin-top:10px}
+input[type=range]{width:100%}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <button id="bMode">Stereo</button>
+  <button id="bFs">Schermo intero</button>
+  <button id="bMenu">Menu</button>
+</div>
+<div id="ui">
+  <div class="card">
+    <h1>Hand tracking in passthrough</h1>
+    <p>Inserisci il telefono nel Cardboard: la fotocamera posteriore viene mostrata in doppia vista (una per occhio) e le tue mani vengono tracciate in tempo reale.</p>
+    <ul>
+      <li>Apri questa pagina in una scheda a sé (non in anteprima) e consenti la fotocamera.</li>
+      <li>Orienta il telefono in orizzontale.</li>
+      <li>Pizzica con pollice e indice per afferrare la sfera.</li>
+    </ul>
+    <label>Distanza tra le viste: <span id="ipdv">0</span> px</label>
+    <input id="ipd" type="range" min="-40" max="40" value="0">
+    <label>Zoom immagine: <span id="zv">1.0</span>×</label>
+    <input id="zoom" type="range" min="1" max="2" step="0.05" value="1">
+    <button id="go">Avvia</button>
+    <div id="status"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const cv=$("c"),ctx=cv.getContext("2d");
+const video=document.createElement("video");
+video.setAttribute("playsinline","");video.muted=true;
+let stereo=true,hands=null,last=null,running=false,busy=false;
+let ipd=0,zoom=1;
+const ball={x:.5,y:.5,r:.06,held:null};
+const LINKS=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+$("ipd").oninput=e=>{ipd=+e.target.value;$("ipdv").textContent=ipd};
+$("zoom").oninput=e=>{zoom=+e.target.value;$("zv").textContent=zoom.toFixed(1)};
+$("bMode").onclick=()=>{stereo=!stereo;$("bMode").textContent=stereo?"Stereo":"Singola"};
+$("bFs").onclick=()=>{const d=document.documentElement;(d.requestFullscreen||d.webkitRequestFullscreen).call(d)};
+$("bMenu").onclick=()=>{$("ui").style.display="flex"};
+
+function resize(){const r=devicePixelRatio||1;cv.width=innerWidth*r;cv.height=innerHeight*r}
+addEventListener("resize",resize);resize();
+
+function setStatus(t){$("status").textContent=t}
+
+async function start(){
+  setStatus("Richiesta fotocamera…");
+  try{
+    const s=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}}});
+    video.srcObject=s;await video.play();
+  }catch(e){setStatus("Fotocamera non disponibile: "+e.message+". Apri la pagina in una scheda propria e consenti l’accesso.");return}
+  setStatus("Caricamento modello mani…");
+  try{
+    if(!window.Hands)throw new Error("libreria non caricata");
+    hands=new Hands({locateFile:f=>"https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/"+f});
+    hands.setOptions({maxNumHands:2,modelComplexity:0,minDetectionConfidence:.6,minTrackingConfidence:.5});
+    hands.onResults(r=>{last=r.multiHandLandmarks||[]});
+    await hands.initialize();
+  }catch(e){setStatus("Modello mani non caricato ("+e.message+"). Se la pagina è ospitata con restrizioni di rete, scaricala e aprila da un tuo host (es. GitHub Pages).");}
+  $("ui").style.display="none";$("hud").style.display="flex";
+  if(!running){running=true;loop()}
+  try{await (document.documentElement.requestFullscreen||(()=>{})).call(document.documentElement);screen.orientation&&screen.orientation.lock&&screen.orientation.lock("landscape").catch(()=>{})}catch(e){}
+}
+$("go").onclick=start;
+
+async function loop(){
+  if(hands&&!busy&&video.readyState>=2){busy=true;hands.send({image:video}).catch(()=>{}).finally(()=>{busy=false})}
+  update();draw();requestAnimationFrame(loop);
+}
+
+function px(p){return{x:p.x*video.videoWidth,y:p.y*video.videoHeight}}
+function update(){
+  if(!last||!video.videoWidth)return;
+  const W=video.videoWidth,H=video.videoHeight;
+  let grabbed=false;
+  last.forEach((h,i)=>{
+    const a=px(h[4]),b=px(h[8]),w=px(h[0]),m=px(h[9]);
+    const size=Math.hypot(w.x-m.x,w.y-m.y)||1;
+    const pinch=Math.hypot(a.x-b.x,a.y-b.y)/size<0.35;
+    const cx=(h[4].x+h[8].x)/2,cy=(h[4].y+h[8].y)/2;
+    h.pinch=pinch;h.pc={x:cx,y:cy};
+    const d=Math.hypot((cx-ball.x)*W,(cy-ball.y)*H);
+    if(pinch&&(ball.held===i||(ball.held===null&&d<ball.r*H*1.6))){ball.held=i;ball.x=cx;ball.y=cy;grabbed=true}
+  });
+  if(!grabbed)ball.held=null;
+}
+
+function scene(g,ox,w,h){
+  g.save();g.beginPath();g.rect(ox,0,w,h);g.clip();g.translate(ox,0);
+  const vw=video.videoWidth||16,vh=video.videoHeight||9;
+  const s=Math.max(w/vw,h/vh)*zoom;
+  const dw=vw*s,dh=vh*s,dx=(w-dw)/2,dy=(h-dh)/2;
+  if(video.videoWidth)g.drawImage(video,dx,dy,dw,dh);
+  const P=p=>({x:dx+p.x*dw,y:dy+p.y*dh});
+  // sfera
+  const b=P(ball),br=ball.r*dh;
+  g.beginPath();g.arc(b.x,b.y,br,0,7);
+  g.fillStyle=ball.held!==null?"rgba(61,220,151,.75)":"rgba(255,170,60,.7)";g.fill();
+  g.lineWidth=3;g.strokeStyle="#fff";g.stroke();
+  // mani
+  (last||[]).forEach(hd=>{
+    const col=hd.pinch?"#3ddc97":"#6ab7ff";
+    g.lineWidth=Math.max(2,h*.006);g.strokeStyle=col;g.lineCap="round";
+    g.beginPath();LINKS.forEach(([i,j])=>{const a=P(hd[i]),c=P(hd[j]);g.moveTo(a.x,a.y);g.lineTo(c.x,c.y)});g.stroke();
+    hd.forEach((p,i)=>{const q=P(p);g.beginPath();g.arc(q.x,q.y,(i%4===0&&i>0)?h*.014:h*.008,0,7);g.fillStyle=(i===4||i===8)&&hd.pinch?"#fff":col;g.fill()});
+  });
+  g.restore();
+}
+
+function draw(){
+  const W=cv.width,H=cv.height;
+  ctx.fillStyle="#000";ctx.fillRect(0,0,W,H);
+  if(stereo){
+    const hw=W/2,off=ipd*(devicePixelRatio||1);
+    scene(ctx,0,hw,H);
+    ctx.save();ctx.translate(off,0);scene(ctx,hw-off,hw,H);ctx.restore();
+    ctx.fillStyle="#000";ctx.fillRect(hw-1,0,2,H);
+  }else scene(ctx,0,W,H);
+}
+})();
+</script>
+</body>
+</html>
